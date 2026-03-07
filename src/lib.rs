@@ -1,0 +1,21 @@
+pub mod client;
+pub mod error;
+pub mod mcp;
+pub mod message;
+pub mod provider;
+pub mod session;
+pub mod skill;
+pub mod stream;
+pub mod tool;
+pub mod types;
+
+pub use client::HttpClient;
+pub use error::{AiError, Result};
+pub use message::{Message, ToolCallInfo};
+pub use provider::{ChatRequest, ChatResponse, Provider};
+pub use session::agent::{AgentConfig, run_agent_loop};
+pub use session::SessionManager;
+pub use stream::handler::StreamChunk;
+pub use stream::StreamEvent;
+pub use tool::{ToolDef, ToolExecutor, ToolRegistry, ToolResult};
+pub use types::{Role, StopReason, TokenUsage};
