@@ -40,6 +40,7 @@ pub async fn run_agent_loop(
     let tool_defs = tools.definitions();
 
     let mut total_usage = TokenUsage::default();
+    let mut empty_retries: u32 = 0;
 
     for _step in 0..config.max_steps {
         // Check abort
@@ -209,6 +210,14 @@ pub async fn run_agent_loop(
                     reason: stop_reason,
                 })
                 .await;
+
+            // If we got zero output after a tool call step (step > 0), retry once
+            // Some models (e.g. Gemini) occasionally return empty after tool results
+            if text_content.is_empty() && _step > 0 && empty_retries < 1 {
+                empty_retries += 1;
+                continue;
+            }
+
             let _ = event_tx.send(StreamEvent::RunComplete).await;
 
             // Add assistant message to history
