@@ -21,6 +21,8 @@ pub enum StreamEvent {
     ToolRunning { call_id: String, tool_name: Option<String> },
     ToolCompleted { call_id: String, output: String, title: Option<String> },
     ToolError { call_id: String, error: String },
+    ToolApprovalRequired { call_id: String, tool_name: String, arguments: String },
+    ToolDenied { call_id: String, error: String },
     StepFinish { tokens: TokenUsage, cost: f64, reason: String },
     RunComplete,
     RunError { error: String },

@@ -2,6 +2,7 @@ use futures::StreamExt;
 
 use crate::message::{Message, ToolCallInfo};
 use crate::provider::{ChatRequest, Provider};
+use crate::session::approval::{ApprovalRequest, ApprovalResponse};
 use crate::stream::handler::{StreamChunk, ToolCallAccumulator};
 use crate::stream::StreamEvent;
 use crate::tool::ToolRegistry;
@@ -12,6 +13,7 @@ pub struct AgentConfig {
     pub cost_per_input: f64,
     pub cost_per_output: f64,
     pub headers: Option<std::collections::HashMap<String, String>>,
+    pub approval_timeout_secs: u64,
 }
 
 impl Default for AgentConfig {
@@ -21,6 +23,7 @@ impl Default for AgentConfig {
             cost_per_input: 0.0,
             cost_per_output: 0.0,
             headers: None,
+            approval_timeout_secs: 300,
         }
     }
 }
@@ -32,6 +35,7 @@ pub async fn run_agent_loop(
     config: &AgentConfig,
     abort_rx: &mut tokio::sync::watch::Receiver<bool>,
     event_tx: tokio::sync::mpsc::Sender<StreamEvent>,
+    approval_tx: Option<tokio::sync::mpsc::Sender<ApprovalRequest>>,
 ) -> crate::Result<()> {
     let tool_defs = tools.definitions();
 
@@ -234,6 +238,95 @@ pub async fn run_agent_loop(
 
         // Execute tools sequentially
         for tc in &completed_calls {
+            // If approval channel is configured, request approval before executing
+            if let Some(ref atx) = approval_tx {
+                let _ = event_tx
+                    .send(StreamEvent::ToolApprovalRequired {
+                        call_id: tc.id.clone(),
+                        tool_name: tc.name.clone(),
+                        arguments: tc.arguments.clone(),
+                    })
+                    .await;
+
+                let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<ApprovalResponse>();
+                let req = ApprovalRequest {
+                    call_id: tc.id.clone(),
+                    tool_name: tc.name.clone(),
+                    arguments: tc.arguments.clone(),
+                    response_tx: resp_tx,
+                };
+
+                if atx.send(req).await.is_err() {
+                    // Approval channel closed — treat as denied
+                    let denial = "Approval channel closed".to_string();
+                    let _ = event_tx
+                        .send(StreamEvent::ToolDenied {
+                            call_id: tc.id.clone(),
+                            error: denial.clone(),
+                        })
+                        .await;
+                    messages.push(Message::tool_result(
+                        tc.id.clone(),
+                        format!("Tool denied: {denial}"),
+                    ));
+                    continue;
+                }
+
+                let timeout_dur = std::time::Duration::from_secs(config.approval_timeout_secs);
+                let approval_result = tokio::select! {
+                    res = tokio::time::timeout(timeout_dur, resp_rx) => {
+                        match res {
+                            Ok(Ok(response)) => Some(response),
+                            Ok(Err(_)) => {
+                                // oneshot sender dropped
+                                Some(ApprovalResponse::Denied {
+                                    message: Some("Approval channel closed".to_string()),
+                                })
+                            }
+                            Err(_) => {
+                                // Timeout
+                                Some(ApprovalResponse::Denied {
+                                    message: Some("Approval timed out".to_string()),
+                                })
+                            }
+                        }
+                    }
+                    _ = abort_rx.changed() => {
+                        if *abort_rx.borrow() {
+                            let _ = event_tx.send(StreamEvent::RunAborted).await;
+                            return Ok(());
+                        }
+                        // Spurious wake — treat as denied
+                        Some(ApprovalResponse::Denied {
+                            message: Some("Aborted during approval".to_string()),
+                        })
+                    }
+                };
+
+                match approval_result {
+                    Some(ApprovalResponse::Approved) => {
+                        // Fall through to execute the tool below
+                    }
+                    Some(ApprovalResponse::Denied { message }) => {
+                        let denial = message.unwrap_or_else(|| "Tool call denied by user".to_string());
+                        let _ = event_tx
+                            .send(StreamEvent::ToolDenied {
+                                call_id: tc.id.clone(),
+                                error: denial.clone(),
+                            })
+                            .await;
+                        messages.push(Message::tool_result(
+                            tc.id.clone(),
+                            format!("Tool denied: {denial}"),
+                        ));
+                        continue;
+                    }
+                    None => {
+                        continue;
+                    }
+                }
+            }
+
             let _ = event_tx
                 .send(StreamEvent::ToolRunning {
                     call_id: tc.id.clone(),
