@@ -14,6 +14,7 @@ pub use error::{AiError, Result};
 pub use message::{Message, ToolCallInfo};
 pub use provider::{ChatRequest, ChatResponse, Provider};
 pub use session::agent::{AgentConfig, run_agent_loop};
+pub use session::approval::{ApprovalRequest, ApprovalResponse};
 pub use session::SessionManager;
 pub use stream::handler::StreamChunk;
 pub use stream::StreamEvent;
