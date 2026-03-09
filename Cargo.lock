@@ -18,6 +18,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "bytes",
+ "eventsource-stream",
  "futures",
  "globset",
  "ignore",

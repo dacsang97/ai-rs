@@ -1,15 +1,14 @@
 use std::pin::Pin;
 
 use async_trait::async_trait;
+use eventsource_stream::Eventsource;
 use futures::stream::{Stream, StreamExt};
-use reqwest_eventsource::EventSource;
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::client::HttpClient;
 use crate::message::{Message, ToolCallInfo};
 use crate::stream::handler::{self, StreamChunk};
-use crate::stream::sse::SseStream;
 use crate::types::{StopReason, TokenUsage};
 use crate::{AiError, Result};
 
@@ -104,6 +103,10 @@ impl Provider for OpenAiProvider {
         let body = self.build_request_body(&request, true);
 
         let url = format!("{}/chat/completions", self.client.base_url());
+        log::info!("[chat_stream] POST {} model={}", url, self.model);
+        log::debug!("[chat_stream] body: {}", serde_json::to_string_pretty(&body).unwrap_or_default());
+
+        // Pre-flight: send request manually to capture error body on non-2xx
         let mut req_builder = reqwest::Client::new()
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.client.api_key()))
@@ -121,11 +124,33 @@ impl Provider for OpenAiProvider {
 
         req_builder = req_builder.json(&body);
 
-        let es = EventSource::new(req_builder)
-            .map_err(|e| AiError::Stream(e.to_string()))?;
+        let response = req_builder.send().await?;
+        let status = response.status();
+        log::info!("[chat_stream] response status: {}", status);
 
-        let sse = SseStream::new(es);
-        let raw_stream = sse.into_stream();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            log::error!("[chat_stream] error response ({}): {}", status, error_body);
+            return Err(AiError::Api {
+                status: status.as_u16(),
+                message: error_body,
+            });
+        }
+
+        // Build SSE stream from the successful response bytes using eventsource_stream
+        let raw_stream = response.bytes_stream().eventsource().filter_map(|result| async move {
+            match result {
+                Ok(event) => {
+                    let data = event.data.trim().to_string();
+                    if data.is_empty() || data.starts_with(':') || data == "[DONE]" {
+                        None
+                    } else {
+                        Some(Ok(data))
+                    }
+                }
+                Err(e) => Some(Err(AiError::Stream(e.to_string()))),
+            }
+        });
 
         let chunk_stream = raw_stream.flat_map(|result| {
             let chunks: Vec<Result<StreamChunk>> = match result {
