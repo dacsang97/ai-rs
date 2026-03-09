@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::client::HttpClient;
-use crate::message::{Message, ToolCallInfo};
+use crate::message::{ContentPart, Message, ToolCallInfo, UserContent};
 use crate::stream::handler::{self, StreamChunk};
 use crate::types::{StopReason, TokenUsage};
 use crate::{AiError, Result};
@@ -179,10 +179,22 @@ fn message_to_openai(msg: &Message) -> serde_json::Value {
             "role": "developer",
             "content": content,
         }),
-        Message::User { content } => json!({
-            "role": "user",
-            "content": content,
-        }),
+        Message::User { content } => match content {
+            UserContent::Text(text) => json!({
+                "role": "user",
+                "content": text,
+            }),
+            UserContent::Parts(parts) => json!({
+                "role": "user",
+                "content": parts.iter().map(|p| match p {
+                    ContentPart::Text { text } => json!({ "type": "text", "text": text }),
+                    ContentPart::ImageUrl { image_url } => json!({
+                        "type": "image_url",
+                        "image_url": { "url": &image_url.url }
+                    }),
+                }).collect::<Vec<_>>()
+            }),
+        },
         Message::Assistant {
             content,
             reasoning: _,

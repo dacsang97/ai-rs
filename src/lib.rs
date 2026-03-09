@@ -11,7 +11,7 @@ pub mod types;
 
 pub use client::HttpClient;
 pub use error::{AiError, Result};
-pub use message::{Message, ToolCallInfo};
+pub use message::{ContentPart, ImageUrl, Message, ToolCallInfo, UserContent};
 pub use provider::{ChatRequest, ChatResponse, Provider};
 pub use session::agent::{AgentConfig, run_agent_loop};
 pub use session::approval::{ApprovalRequest, ApprovalResponse};

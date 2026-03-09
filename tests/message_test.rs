@@ -1,4 +1,4 @@
-use ai_rs::{Message, ToolCallInfo};
+use ai_rs::{ImageUrl, Message, ToolCallInfo};
 
 #[test]
 fn system_constructor() {
@@ -74,4 +74,58 @@ fn message_round_trip() {
     let json = serde_json::to_value(&deserialized).unwrap();
     assert_eq!(json["role"], "user");
     assert_eq!(json["content"], "round trip test");
+}
+
+#[test]
+fn user_with_images_constructor() {
+    let msg = Message::user_with_images(
+        "hello",
+        vec![ImageUrl {
+            url: "data:image/png;base64,abc".into(),
+            detail: None,
+        }],
+    );
+    let json = serde_json::to_value(&msg).unwrap();
+    assert_eq!(json["role"], "user");
+    let content = json["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[0]["text"], "hello");
+    assert_eq!(content[1]["type"], "image_url");
+    assert_eq!(
+        content[1]["image_url"]["url"],
+        "data:image/png;base64,abc"
+    );
+}
+
+#[test]
+fn user_content_backward_compat() {
+    let msg = Message::user("text");
+    let json = serde_json::to_value(&msg).unwrap();
+    assert_eq!(json["role"], "user");
+    assert_eq!(json["content"], "text");
+}
+
+#[test]
+fn user_content_round_trip() {
+    let msg = Message::user_with_images(
+        "describe this",
+        vec![ImageUrl {
+            url: "data:image/jpeg;base64,xyz".into(),
+            detail: Some("high".into()),
+        }],
+    );
+    let serialized = serde_json::to_string(&msg).unwrap();
+    let deserialized: Message = serde_json::from_str(&serialized).unwrap();
+    let json = serde_json::to_value(&deserialized).unwrap();
+    assert_eq!(json["role"], "user");
+    let content = json["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[1]["type"], "image_url");
+    assert_eq!(
+        content[1]["image_url"]["url"],
+        "data:image/jpeg;base64,xyz"
+    );
+    assert_eq!(content[1]["image_url"]["detail"], "high");
 }
