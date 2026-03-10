@@ -8,25 +8,129 @@ use crate::stream::StreamEvent;
 use crate::tool::ToolRegistry;
 use crate::types::TokenUsage;
 
+const DEFAULT_MAX_STEPS: u32 = 100;
+/// Chars threshold before pruning kicks in (~40K tokens).
+const DEFAULT_PRUNE_AFTER: usize = 160_000;
+/// Keep this many chars of recent tool outputs (~20K tokens).
+const DEFAULT_PRUNE_KEEP: usize = 80_000;
+/// Replacement text for pruned tool outputs.
+const PRUNED_MARKER: &str = "[output pruned — use tools to re-read if needed]";
+
+const DEFAULT_STOP_PROMPT: &str = "\
+CRITICAL — MAXIMUM STEPS REACHED
+
+The maximum number of steps allowed for this task has been reached. \
+Tools are disabled. Respond with text only.
+
+STRICT REQUIREMENTS:
+1. Do NOT make any tool calls
+2. Provide a text summary of work done so far
+3. List any remaining tasks that were not completed
+4. Recommend what should be done next";
+
 pub struct AgentConfig {
     pub max_steps: u32,
     pub cost_per_input: f64,
     pub cost_per_output: f64,
     pub headers: Option<std::collections::HashMap<String, String>>,
     pub approval_timeout_secs: u64,
+    /// Prompt injected on the last step so the model wraps up gracefully
+    /// instead of hitting a hard error. Set `None` to use the built-in default.
+    pub stop_prompt: Option<String>,
+    /// Start pruning old tool outputs when total message chars exceed this.
+    pub prune_after: usize,
+    /// Keep this many chars of recent tool outputs unpruned.
+    pub prune_keep: usize,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            max_steps: 25,
+            max_steps: DEFAULT_MAX_STEPS,
             cost_per_input: 0.0,
             cost_per_output: 0.0,
             headers: None,
             approval_timeout_secs: 300,
+            stop_prompt: None,
+            prune_after: DEFAULT_PRUNE_AFTER,
+            prune_keep: DEFAULT_PRUNE_KEEP,
         }
     }
 }
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+/// Rough char-count of a single message (used for pruning heuristic).
+fn msg_chars(msg: &Message) -> usize {
+    match msg {
+        Message::System { content }
+        | Message::Developer { content }
+        | Message::Tool { content, .. } => content.len(),
+        Message::User { content } => match content {
+            crate::message::UserContent::Text(t) => t.len(),
+            crate::message::UserContent::Parts(parts) => parts
+                .iter()
+                .map(|p| match p {
+                    crate::message::ContentPart::Text { text } => text.len(),
+                    crate::message::ContentPart::ImageUrl { .. } => 256,
+                })
+                .sum(),
+        },
+        Message::Assistant {
+            content,
+            reasoning,
+            tool_calls,
+        } => {
+            let c = content.as_deref().map_or(0, str::len);
+            let r = reasoning.as_deref().map_or(0, str::len);
+            let t = tool_calls.as_ref().map_or(0, |calls| {
+                calls.iter().map(|tc| tc.arguments.len() + tc.name.len()).sum()
+            });
+            c + r + t
+        }
+    }
+}
+
+/// Total chars across all messages.
+fn total_chars(msgs: &[Message]) -> usize {
+    msgs.iter().map(|m| msg_chars(m)).sum()
+}
+
+/// Prune old tool-result outputs when context grows too large.
+/// Walks backwards, protecting the most recent `keep` chars of tool outputs,
+/// then replaces older ones with a short marker.
+/// Returns `(pruned_count, freed_chars)`.
+fn prune_tool_outputs(msgs: &mut [Message], after: usize, keep: usize) -> (u32, u64) {
+    let total = total_chars(msgs);
+    if total <= after {
+        return (0, 0);
+    }
+
+    // Walk backwards, accumulate tool-output chars, prune beyond `keep`.
+    let mut recent = 0usize;
+    let mut pruned = 0u32;
+    let mut freed = 0u64;
+
+    for msg in msgs.iter_mut().rev() {
+        if let Message::Tool { content, .. } = msg {
+            let len = content.len();
+            if len <= PRUNED_MARKER.len() {
+                continue;
+            }
+            if recent < keep {
+                recent += len;
+                continue;
+            }
+            freed += (len - PRUNED_MARKER.len()) as u64;
+            *content = PRUNED_MARKER.to_string();
+            pruned += 1;
+        }
+    }
+
+    (pruned, freed)
+}
+
+// ── main loop ────────────────────────────────────────────────────────────────
 
 pub async fn run_agent_loop(
     provider: &dyn Provider,
@@ -42,17 +146,42 @@ pub async fn run_agent_loop(
     let mut total_usage = TokenUsage::default();
     let mut empty_retries: u32 = 0;
 
-    for _step in 0..config.max_steps {
+    for step in 0..config.max_steps {
         // Check abort
         if *abort_rx.borrow() {
             let _ = event_tx.send(StreamEvent::RunAborted).await;
             return Ok(());
         }
 
-        // Build request
+        // ── Prune old tool outputs if context is too large ───────────
+        let (pruned, freed) = prune_tool_outputs(messages, config.prune_after, config.prune_keep);
+        if pruned > 0 {
+            let _ = event_tx
+                .send(StreamEvent::ContextPrune { pruned, freed })
+                .await;
+        }
+
+        // ── Graceful last step: inject stop prompt, disable tools ────
+        let last = step == config.max_steps - 1;
+        if last {
+            let _ = event_tx
+                .send(StreamEvent::MaxStepsWarning {
+                    step,
+                    max_steps: config.max_steps,
+                })
+                .await;
+
+            let prompt = config
+                .stop_prompt
+                .as_deref()
+                .unwrap_or(DEFAULT_STOP_PROMPT);
+            messages.push(Message::developer(prompt));
+        }
+
+        // Build request — strip tools on last step
         let request = ChatRequest {
             messages: messages.clone(),
-            tools: if tool_defs.is_empty() {
+            tools: if last || tool_defs.is_empty() {
                 None
             } else {
                 Some(tool_defs.clone())
@@ -122,7 +251,6 @@ pub async fn run_agent_loop(
                         .await;
                 }
                 StreamChunk::ToolCallStart { index, id, name } => {
-                    // Ensure accumulators vec is large enough
                     while accumulators.len() <= index {
                         accumulators.push(ToolCallAccumulator::new(
                             accumulators.len(),
@@ -140,7 +268,6 @@ pub async fn run_agent_loop(
                         .await;
                 }
                 StreamChunk::ToolCallDelta { index, arguments } => {
-                    // Ensure accumulators vec is large enough
                     while accumulators.len() <= index {
                         accumulators.push(ToolCallAccumulator::new(
                             accumulators.len(),
@@ -213,7 +340,7 @@ pub async fn run_agent_loop(
 
             // If we got zero output after a tool call step (step > 0), retry once
             // Some models (e.g. Gemini) occasionally return empty after tool results
-            if text_content.is_empty() && _step > 0 && empty_retries < 1 {
+            if text_content.is_empty() && step > 0 && empty_retries < 1 {
                 empty_retries += 1;
                 continue;
             }
@@ -266,7 +393,6 @@ pub async fn run_agent_loop(
                 };
 
                 if atx.send(req).await.is_err() {
-                    // Approval channel closed — treat as denied
                     let denial = "Approval channel closed".to_string();
                     let _ = event_tx
                         .send(StreamEvent::ToolDenied {
@@ -287,13 +413,11 @@ pub async fn run_agent_loop(
                         match res {
                             Ok(Ok(response)) => Some(response),
                             Ok(Err(_)) => {
-                                // oneshot sender dropped
                                 Some(ApprovalResponse::Denied {
                                     message: Some("Approval channel closed".to_string()),
                                 })
                             }
                             Err(_) => {
-                                // Timeout
                                 Some(ApprovalResponse::Denied {
                                     message: Some("Approval timed out".to_string()),
                                 })
@@ -305,7 +429,6 @@ pub async fn run_agent_loop(
                             let _ = event_tx.send(StreamEvent::RunAborted).await;
                             return Ok(());
                         }
-                        // Spurious wake — treat as denied
                         Some(ApprovalResponse::Denied {
                             message: Some("Aborted during approval".to_string()),
                         })
@@ -313,9 +436,7 @@ pub async fn run_agent_loop(
                 };
 
                 match approval_result {
-                    Some(ApprovalResponse::Approved) => {
-                        // Fall through to execute the tool below
-                    }
+                    Some(ApprovalResponse::Approved) => {}
                     Some(ApprovalResponse::Denied { message }) => {
                         let denial = message.unwrap_or_else(|| "Tool call denied by user".to_string());
                         let _ = event_tx
@@ -385,11 +506,9 @@ pub async fn run_agent_loop(
                 reason: stop_reason,
             })
             .await;
-
-        // Continue loop for next step
     }
 
-    // Max steps reached
+    // Exhausted all steps (should not reach here if graceful stop worked)
     let _ = event_tx
         .send(StreamEvent::RunError {
             error: format!("Max steps ({}) reached", config.max_steps),

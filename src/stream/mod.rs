@@ -24,6 +24,8 @@ pub enum StreamEvent {
     ToolApprovalRequired { call_id: String, tool_name: String, arguments: String },
     ToolDenied { call_id: String, error: String },
     StepFinish { tokens: TokenUsage, cost: f64, reason: String },
+    ContextPrune { pruned: u32, freed: u64 },
+    MaxStepsWarning { step: u32, max_steps: u32 },
     RunComplete,
     RunError { error: String },
     RunAborted,
