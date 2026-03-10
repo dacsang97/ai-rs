@@ -7,6 +7,7 @@ use crate::stream::handler::{StreamChunk, ToolCallAccumulator};
 use crate::stream::StreamEvent;
 use crate::tool::ToolRegistry;
 use crate::types::TokenUsage;
+use std::collections::HashSet;
 
 const DEFAULT_MAX_STEPS: u32 = 100;
 /// Chars threshold before pruning kicks in (~40K tokens).
@@ -137,11 +138,15 @@ pub async fn run_agent_loop(
     messages: &mut Vec<Message>,
     tools: &ToolRegistry,
     config: &AgentConfig,
+    excluded_tools: Option<HashSet<String>>,
     abort_rx: &mut tokio::sync::watch::Receiver<bool>,
     event_tx: tokio::sync::mpsc::Sender<StreamEvent>,
     approval_tx: Option<tokio::sync::mpsc::Sender<ApprovalRequest>>,
 ) -> crate::Result<()> {
-    let tool_defs = tools.definitions();
+    let tool_defs = match &excluded_tools {
+        Some(exclude) if !exclude.is_empty() => tools.definitions_excluding(exclude),
+        _ => tools.definitions(),
+    };
 
     let mut total_usage = TokenUsage::default();
     let mut empty_retries: u32 = 0;

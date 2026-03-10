@@ -1,6 +1,8 @@
 pub mod builtin;
 pub mod mcp;
 
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +43,14 @@ impl ToolRegistry {
 
     pub fn definitions(&self) -> Vec<ToolDef> {
         self.executors.iter().flat_map(|e| e.definitions()).collect()
+    }
+
+    pub fn definitions_excluding(&self, exclude: &HashSet<String>) -> Vec<ToolDef> {
+        self.executors
+            .iter()
+            .flat_map(|e| e.definitions())
+            .filter(|d| !exclude.contains(&d.name))
+            .collect()
     }
 
     pub async fn execute(
