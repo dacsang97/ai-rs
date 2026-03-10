@@ -23,6 +23,17 @@ impl OpenAiCompatibleProvider {
             inner: OpenAiProvider::with_base_url(base_url, api_key, model),
         }
     }
+
+    pub fn with_headers(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+        headers: std::collections::HashMap<String, String>,
+    ) -> Self {
+        Self {
+            inner: OpenAiProvider::with_base_url_and_headers(base_url, api_key, model, headers),
+        }
+    }
 }
 
 #[async_trait]
