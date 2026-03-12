@@ -1,4 +1,5 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use uuid::Uuid;
 
 use crate::stream::handler::StreamChunk;
@@ -45,7 +46,7 @@ struct GoogleFunctionCall {
     args: serde_json::Value,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GoogleUsageMetadata {
     #[serde(default)]
@@ -101,9 +102,23 @@ pub fn parse_google_chunk(raw: &str) -> crate::Result<Vec<StreamChunk>> {
         if let Some(ref reason) = candidate.finish_reason {
             let stop_reason = parse_finish_reason(reason);
             let usage = resp.usage_metadata.as_ref().map(|u| {
-                TokenUsage::new(
+                let output = u.candidates_token_count + u.thoughts_token_count;
+                TokenUsage::with_details(
                     u.prompt_token_count,
-                    u.candidates_token_count + u.thoughts_token_count,
+                    output,
+                    u.prompt_token_count,
+                    u.candidates_token_count,
+                    u.thoughts_token_count,
+                    0,
+                    0,
+                )
+                .with_metadata(
+                    serde_json::to_value(u).ok(),
+                    Some(json!({
+                        "provider": "google",
+                        "candidates_tokens": u.candidates_token_count,
+                        "thought_tokens": u.thoughts_token_count,
+                    })),
                 )
             });
             results.push(StreamChunk::Done { stop_reason, usage });
@@ -113,12 +128,28 @@ pub fn parse_google_chunk(raw: &str) -> crate::Result<Vec<StreamChunk>> {
     // Handle usage-only chunks (no candidates)
     if resp.candidates.is_empty() {
         if let Some(ref u) = resp.usage_metadata {
+            let output = u.candidates_token_count + u.thoughts_token_count;
             results.push(StreamChunk::Done {
                 stop_reason: None,
-                usage: Some(TokenUsage::new(
-                    u.prompt_token_count,
-                    u.candidates_token_count + u.thoughts_token_count,
-                )),
+                usage: Some(
+                    TokenUsage::with_details(
+                        u.prompt_token_count,
+                        output,
+                        u.prompt_token_count,
+                        u.candidates_token_count,
+                        u.thoughts_token_count,
+                        0,
+                        0,
+                    )
+                    .with_metadata(
+                        serde_json::to_value(u).ok(),
+                        Some(json!({
+                            "provider": "google",
+                            "candidates_tokens": u.candidates_token_count,
+                            "thought_tokens": u.thoughts_token_count,
+                        })),
+                    ),
+                ),
             });
         }
     }

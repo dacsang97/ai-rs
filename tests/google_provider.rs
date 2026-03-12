@@ -68,6 +68,8 @@ fn usage_only_chunk() {
             assert_eq!(u.input_tokens, 100);
             assert_eq!(u.output_tokens, 70); // candidates(50) + thoughts(20)
             assert_eq!(u.total_tokens, 170);
+            assert_eq!(u.output_text_tokens, 50);
+            assert_eq!(u.reasoning_tokens, 20);
         }
         other => panic!("expected Done, got {:?}", other),
     }
@@ -140,6 +142,8 @@ fn finish_with_usage_metadata() {
             let u = usage.as_ref().expect("expected usage");
             assert_eq!(u.input_tokens, 10);
             assert_eq!(u.output_tokens, 5);
+            assert_eq!(u.output_text_tokens, 5);
+            assert_eq!(u.reasoning_tokens, 0);
         }
         other => panic!("expected Done, got {:?}", other),
     }

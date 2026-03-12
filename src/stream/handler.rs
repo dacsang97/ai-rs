@@ -1,4 +1,5 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::types::{StopReason, TokenUsage};
 
@@ -90,7 +91,7 @@ pub(crate) struct ChunkFunction {
     pub arguments: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct ChunkUsage {
     #[serde(default)]
     pub prompt_tokens: u64,
@@ -98,6 +99,22 @@ pub(crate) struct ChunkUsage {
     pub completion_tokens: u64,
     #[serde(default)]
     pub total_tokens: u64,
+    #[serde(default)]
+    pub prompt_tokens_details: Option<ChunkPromptTokenDetails>,
+    #[serde(default)]
+    pub completion_tokens_details: Option<ChunkCompletionTokenDetails>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub(crate) struct ChunkPromptTokenDetails {
+    #[serde(default)]
+    pub cached_tokens: u64,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub(crate) struct ChunkCompletionTokenDetails {
+    #[serde(default)]
+    pub reasoning_tokens: u64,
 }
 
 fn parse_stop_reason(reason: &str) -> Option<StopReason> {
@@ -163,10 +180,34 @@ pub fn parse_chunk(raw: &str) -> crate::Result<Vec<StreamChunk>> {
         if let Some(ref reason) = choice.finish_reason {
             results.push(StreamChunk::Done {
                 stop_reason: parse_stop_reason(reason),
-                usage: chunk.usage.as_ref().map(|u| TokenUsage::new(
-                    u.prompt_tokens,
-                    u.completion_tokens,
-                )),
+                usage: chunk.usage.as_ref().map(|u| {
+                    let cache_read = u
+                        .prompt_tokens_details
+                        .as_ref()
+                        .map_or(0, |d| d.cached_tokens);
+                    let reasoning = u
+                        .completion_tokens_details
+                        .as_ref()
+                        .map_or(0, |d| d.reasoning_tokens);
+
+                    TokenUsage::with_details(
+                        u.prompt_tokens,
+                        u.completion_tokens,
+                        u.prompt_tokens.saturating_sub(cache_read),
+                        u.completion_tokens.saturating_sub(reasoning),
+                        reasoning,
+                        cache_read,
+                        0,
+                    )
+                    .with_metadata(
+                        serde_json::to_value(u).ok(),
+                        Some(json!({
+                            "provider": "openai",
+                            "cached_input_tokens": cache_read,
+                            "reasoning_tokens": reasoning,
+                        })),
+                    )
+                }),
             });
         }
     }
@@ -176,7 +217,41 @@ pub fn parse_chunk(raw: &str) -> crate::Result<Vec<StreamChunk>> {
         if let Some(ref u) = chunk.usage {
             results.push(StreamChunk::Done {
                 stop_reason: None,
-                usage: Some(TokenUsage::new(u.prompt_tokens, u.completion_tokens)),
+                usage: Some(
+                    TokenUsage::with_details(
+                        u.prompt_tokens,
+                        u.completion_tokens,
+                        u.prompt_tokens.saturating_sub(
+                            u.prompt_tokens_details
+                                .as_ref()
+                                .map_or(0, |d| d.cached_tokens),
+                        ),
+                        u.completion_tokens.saturating_sub(
+                            u.completion_tokens_details
+                                .as_ref()
+                                .map_or(0, |d| d.reasoning_tokens),
+                        ),
+                        u.completion_tokens_details
+                            .as_ref()
+                            .map_or(0, |d| d.reasoning_tokens),
+                        u.prompt_tokens_details
+                            .as_ref()
+                            .map_or(0, |d| d.cached_tokens),
+                        0,
+                    )
+                    .with_metadata(
+                        serde_json::to_value(u).ok(),
+                        Some(json!({
+                            "provider": "openai",
+                            "cached_input_tokens": u.prompt_tokens_details
+                                .as_ref()
+                                .map_or(0, |d| d.cached_tokens),
+                            "reasoning_tokens": u.completion_tokens_details
+                                .as_ref()
+                                .map_or(0, |d| d.reasoning_tokens),
+                        })),
+                    ),
+                ),
             });
         }
     }

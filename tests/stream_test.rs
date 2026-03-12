@@ -1,4 +1,32 @@
-use ai_rs::{StreamEvent, TokenUsage};
+use ai_rs::{DataPart, SourcePart, StreamEvent, TokenUsage};
+
+#[test]
+fn run_start_serialization() {
+    let event = StreamEvent::RunStart {
+        run_id: "run-1".into(),
+        metadata: Some(serde_json::json!({ "max_steps": 8 })),
+    };
+    let json = serde_json::to_value(&event).unwrap();
+    assert_eq!(json["type"], "run-start");
+    assert_eq!(json["run_id"], "run-1");
+    assert_eq!(json["metadata"]["max_steps"], 8);
+}
+
+#[test]
+fn step_start_serialization() {
+    let event = StreamEvent::StepStart {
+        run_id: "run-1".into(),
+        step_id: "run-1:1".into(),
+        step: 1,
+        metadata: Some(serde_json::json!({ "tools_enabled": true })),
+    };
+    let json = serde_json::to_value(&event).unwrap();
+    assert_eq!(json["type"], "step-start");
+    assert_eq!(json["run_id"], "run-1");
+    assert_eq!(json["step_id"], "run-1:1");
+    assert_eq!(json["step"], 1);
+    assert_eq!(json["metadata"]["tools_enabled"], true);
+}
 
 #[test]
 fn text_start_serialization() {
@@ -50,6 +78,22 @@ fn reasoning_delta_serialization() {
     let json = serde_json::to_value(&event).unwrap();
     assert_eq!(json["type"], "reasoning-delta");
     assert_eq!(json["delta"], "hmm");
+}
+
+#[test]
+fn part_metadata_serialization() {
+    let event = StreamEvent::PartMetadata {
+        run_id: "run-1".into(),
+        step_id: Some("run-1:1".into()),
+        part_id: "part-1".into(),
+        part_type: "text".into(),
+        metadata: Some(serde_json::json!({ "synthetic": false })),
+    };
+    let json = serde_json::to_value(&event).unwrap();
+    assert_eq!(json["type"], "part-metadata");
+    assert_eq!(json["run_id"], "run-1");
+    assert_eq!(json["part_id"], "part-1");
+    assert_eq!(json["part_type"], "text");
 }
 
 #[test]
@@ -110,6 +154,62 @@ fn tool_error_serialization() {
 }
 
 #[test]
+fn tool_call_metadata_serialization() {
+    let event = StreamEvent::ToolCallMetadata {
+        run_id: "run-1".into(),
+        step_id: "run-1:1".into(),
+        call_id: "call_42".into(),
+        tool_name: Some("bash".into()),
+        metadata: Some(serde_json::json!({ "stage": "running" })),
+    };
+    let json = serde_json::to_value(&event).unwrap();
+    assert_eq!(json["type"], "tool-call-metadata");
+    assert_eq!(json["run_id"], "run-1");
+    assert_eq!(json["step_id"], "run-1:1");
+    assert_eq!(json["call_id"], "call_42");
+    assert_eq!(json["metadata"]["stage"], "running");
+}
+
+#[test]
+fn source_serialization() {
+    let event = StreamEvent::Source {
+        run_id: "run-1".into(),
+        step_id: Some("run-1:1".into()),
+        source: SourcePart {
+            id: "src-1".into(),
+            source_type: "url".into(),
+            title: Some("Docs".into()),
+            uri: Some("https://example.com".into()),
+            mime_type: None,
+            metadata: Some(serde_json::json!({ "provider": "rag" })),
+        },
+    };
+    let json = serde_json::to_value(&event).unwrap();
+    assert_eq!(json["type"], "source");
+    assert_eq!(json["source"]["id"], "src-1");
+    assert_eq!(json["source"]["source_type"], "url");
+}
+
+#[test]
+fn data_serialization() {
+    let event = StreamEvent::Data {
+        run_id: "run-1".into(),
+        step_id: Some("run-1:1".into()),
+        part: DataPart {
+            id: "data-1".into(),
+            data_type: "notification".into(),
+            data: serde_json::json!({ "level": "info" }),
+            transient: true,
+        },
+    };
+    let json = serde_json::to_value(&event).unwrap();
+    assert_eq!(json["type"], "data");
+    assert_eq!(json["part"]["id"], "data-1");
+    assert_eq!(json["part"]["data_type"], "notification");
+    assert_eq!(json["part"]["transient"], true);
+}
+
+#[test]
 fn step_finish_with_token_usage() {
     let event = StreamEvent::StepFinish {
         tokens: TokenUsage::new(100, 200),
@@ -155,17 +255,55 @@ fn run_aborted_serialization() {
 fn all_tags_are_kebab_case() {
     // Exhaustive check that every variant uses kebab-case tags
     let events: Vec<StreamEvent> = vec![
+        StreamEvent::RunStart { run_id: "run".into(), metadata: None },
+        StreamEvent::StepStart { run_id: "run".into(), step_id: "run:1".into(), step: 1, metadata: None },
         StreamEvent::TextStart { part_id: "x".into() },
         StreamEvent::TextDelta { part_id: "x".into(), delta: "d".into() },
         StreamEvent::TextEnd { part_id: "x".into() },
         StreamEvent::ReasoningStart { part_id: "x".into() },
         StreamEvent::ReasoningDelta { part_id: "x".into(), delta: "d".into() },
         StreamEvent::ReasoningEnd { part_id: "x".into() },
+        StreamEvent::PartMetadata {
+            run_id: "run".into(),
+            step_id: Some("run:1".into()),
+            part_id: "part".into(),
+            part_type: "text".into(),
+            metadata: None,
+        },
         StreamEvent::ToolPending { call_id: "x".into(), tool_name: "t".into() },
         StreamEvent::ToolInputDelta { call_id: "x".into(), delta: "d".into() },
         StreamEvent::ToolRunning { call_id: "x".into(), tool_name: None },
         StreamEvent::ToolCompleted { call_id: "x".into(), output: "o".into(), title: None },
         StreamEvent::ToolError { call_id: "x".into(), error: "e".into() },
+        StreamEvent::ToolCallMetadata {
+            run_id: "run".into(),
+            step_id: "run:1".into(),
+            call_id: "call".into(),
+            tool_name: Some("tool".into()),
+            metadata: None,
+        },
+        StreamEvent::Source {
+            run_id: "run".into(),
+            step_id: Some("run:1".into()),
+            source: SourcePart {
+                id: "src".into(),
+                source_type: "url".into(),
+                title: None,
+                uri: None,
+                mime_type: None,
+                metadata: None,
+            },
+        },
+        StreamEvent::Data {
+            run_id: "run".into(),
+            step_id: Some("run:1".into()),
+            part: DataPart {
+                id: "data".into(),
+                data_type: "notification".into(),
+                data: serde_json::json!({}),
+                transient: false,
+            },
+        },
         StreamEvent::StepFinish { tokens: TokenUsage::new(0, 0), cost: 0.0, reason: "stop".into() },
         StreamEvent::RunComplete,
         StreamEvent::RunError { error: "e".into() },

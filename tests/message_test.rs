@@ -1,4 +1,4 @@
-use ai_rs::{ImageUrl, Message, ToolCallInfo};
+use ai_rs::{ImageUrl, Message, MessageEnvelope, MessageMetadata, ToolCallInfo};
 
 #[test]
 fn system_constructor() {
@@ -128,4 +128,24 @@ fn user_content_round_trip() {
         "data:image/jpeg;base64,xyz"
     );
     assert_eq!(content[1]["image_url"]["detail"], "high");
+}
+
+#[test]
+fn message_envelope_with_metadata_serialization() {
+    let envelope = MessageEnvelope::with_metadata(
+        Message::assistant("done"),
+        MessageMetadata {
+            message_id: Some("msg-1".into()),
+            run_id: Some("run-1".into()),
+            step_id: Some("step-1".into()),
+            data: Some(serde_json::json!({ "source": "agent-loop" })),
+        },
+    );
+
+    let json = serde_json::to_value(&envelope).unwrap();
+    assert_eq!(json["message"]["role"], "assistant");
+    assert_eq!(json["metadata"]["message_id"], "msg-1");
+    assert_eq!(json["metadata"]["run_id"], "run-1");
+    assert_eq!(json["metadata"]["step_id"], "step-1");
+    assert_eq!(json["metadata"]["data"]["source"], "agent-loop");
 }
