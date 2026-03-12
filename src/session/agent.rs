@@ -1,13 +1,16 @@
 use futures::StreamExt;
+use serde_json::json;
 
 use crate::message::{Message, ToolCallInfo};
-use crate::provider::{ChatRequest, Provider};
+use crate::provider::{ChatRequest, Provider, ToolChoice};
 use crate::session::approval::{ApprovalRequest, ApprovalResponse};
 use crate::stream::handler::{StreamChunk, ToolCallAccumulator};
 use crate::stream::StreamEvent;
 use crate::tool::ToolRegistry;
 use crate::types::TokenUsage;
+use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 const DEFAULT_MAX_STEPS: u32 = 100;
 /// Chars threshold before pruning kicks in (~40K tokens).
@@ -29,6 +32,40 @@ STRICT REQUIREMENTS:
 3. List any remaining tasks that were not completed
 4. Recommend what should be done next";
 
+#[derive(Debug, Clone, Default)]
+pub struct StepPreparation {
+    pub tool_choice: Option<ToolChoice>,
+    pub active_tools: Option<Vec<String>>,
+    pub metadata: Option<serde_json::Value>,
+    pub headers: Option<HashMap<String, String>>,
+    pub stop: Option<Vec<String>>,
+    pub extra_messages: Vec<Message>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StepContext {
+    pub run_id: String,
+    pub step_id: String,
+    pub step: u32,
+    pub max_steps: u32,
+    pub is_last_step: bool,
+    pub available_tools: Vec<String>,
+    pub total_usage: TokenUsage,
+}
+
+#[derive(Debug, Clone)]
+pub struct LoopState {
+    pub run_id: String,
+    pub completed_steps: u32,
+    pub total_usage: TokenUsage,
+    pub last_stop_reason: Option<String>,
+    pub last_text_output: String,
+    pub last_tool_calls: Vec<ToolCallInfo>,
+}
+
+pub type PrepareStepHook = Arc<dyn Fn(&StepContext) -> StepPreparation + Send + Sync>;
+pub type StopWhenHook = Arc<dyn Fn(&LoopState) -> bool + Send + Sync>;
+
 pub struct AgentConfig {
     pub max_steps: u32,
     pub cost_per_input: f64,
@@ -42,6 +79,10 @@ pub struct AgentConfig {
     pub prune_after: usize,
     /// Keep this many chars of recent tool outputs unpruned.
     pub prune_keep: usize,
+    /// Optional per-step hook for dynamically shaping the next provider request.
+    pub prepare_step: Option<PrepareStepHook>,
+    /// Optional predicate checked between steps to stop the loop gracefully.
+    pub stop_when: Option<StopWhenHook>,
 }
 
 impl Default for AgentConfig {
@@ -55,6 +96,8 @@ impl Default for AgentConfig {
             stop_prompt: None,
             prune_after: DEFAULT_PRUNE_AFTER,
             prune_keep: DEFAULT_PRUNE_KEEP,
+            prepare_step: None,
+            stop_when: None,
         }
     }
 }
@@ -150,8 +193,29 @@ pub async fn run_agent_loop(
 
     let mut total_usage = TokenUsage::default();
     let mut empty_retries: u32 = 0;
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let available_tools: Vec<String> = tool_defs.iter().map(|d| d.name.clone()).collect();
+    let mut last_loop_state: Option<LoopState> = None;
+
+    let _ = event_tx
+        .send(StreamEvent::RunStart {
+            run_id: run_id.clone(),
+            metadata: Some(json!({
+                "max_steps": config.max_steps,
+                "prune_after": config.prune_after,
+                "prune_keep": config.prune_keep,
+            })),
+        })
+        .await;
 
     for step in 0..config.max_steps {
+        if let (Some(stop_when), Some(loop_state)) = (&config.stop_when, &last_loop_state) {
+            if stop_when(loop_state) {
+                let _ = event_tx.send(StreamEvent::RunComplete).await;
+                return Ok(());
+            }
+        }
+
         // Check abort
         if *abort_rx.borrow() {
             let _ = event_tx.send(StreamEvent::RunAborted).await;
@@ -168,6 +232,35 @@ pub async fn run_agent_loop(
 
         // ── Graceful last step: inject stop prompt, disable tools ────
         let last = step == config.max_steps - 1;
+        let step_id = format!("{run_id}:{}", step + 1);
+        let step_context = StepContext {
+            run_id: run_id.clone(),
+            step_id: step_id.clone(),
+            step: step + 1,
+            max_steps: config.max_steps,
+            is_last_step: last,
+            available_tools: available_tools.clone(),
+            total_usage: total_usage.clone(),
+        };
+        let step_prep = config
+            .prepare_step
+            .as_ref()
+            .map(|hook| hook(&step_context))
+            .unwrap_or_default();
+        let active_tools = step_prep.active_tools.clone();
+        let tools_enabled = !(last || tool_defs.is_empty());
+        let _ = event_tx
+            .send(StreamEvent::StepStart {
+                run_id: run_id.clone(),
+                step_id: step_id.clone(),
+                step: step + 1,
+                metadata: Some(json!({
+                    "is_last": last,
+                    "tools_enabled": tools_enabled,
+                    "active_tools": active_tools,
+                })),
+            })
+            .await;
         if last {
             let _ = event_tx
                 .send(StreamEvent::MaxStepsWarning {
@@ -184,8 +277,19 @@ pub async fn run_agent_loop(
         }
 
         // Build request — strip tools on last step
+        let mut request_messages = messages.clone();
+        if !step_prep.extra_messages.is_empty() {
+            request_messages.extend(step_prep.extra_messages.clone());
+        }
+
+        let mut headers = config.headers.clone().unwrap_or_default();
+        if let Some(extra_headers) = step_prep.headers.clone() {
+            headers.extend(extra_headers);
+        }
+        let headers = (!headers.is_empty()).then_some(headers);
+
         let request = ChatRequest {
-            messages: messages.clone(),
+            messages: request_messages,
             tools: if last || tool_defs.is_empty() {
                 None
             } else {
@@ -193,9 +297,16 @@ pub async fn run_agent_loop(
             },
             temperature: None,
             max_tokens: None,
-            stop: None,
-            headers: config.headers.clone(),
+            stop: step_prep.stop.clone(),
+            headers,
             reasoning_effort: None,
+            session_id: None,
+            provider_options: None,
+            metadata: step_prep.metadata.clone(),
+            tool_choice: step_prep.tool_choice.clone(),
+            active_tools: step_prep.active_tools.clone(),
+            transport: None,
+            max_retries: None,
         };
 
         // Call provider.chat_stream
@@ -229,6 +340,15 @@ pub async fn run_agent_loop(
                                 part_id: text_part_id.clone(),
                             })
                             .await;
+                        let _ = event_tx
+                            .send(StreamEvent::PartMetadata {
+                                run_id: run_id.clone(),
+                                step_id: Some(step_id.clone()),
+                                part_id: text_part_id.clone(),
+                                part_type: "text".to_string(),
+                                metadata: None,
+                            })
+                            .await;
                     }
                     text_content.push_str(&delta);
                     let _ = event_tx
@@ -244,6 +364,15 @@ pub async fn run_agent_loop(
                         let _ = event_tx
                             .send(StreamEvent::ReasoningStart {
                                 part_id: reasoning_part_id.clone(),
+                            })
+                            .await;
+                        let _ = event_tx
+                            .send(StreamEvent::PartMetadata {
+                                run_id: run_id.clone(),
+                                step_id: Some(step_id.clone()),
+                                part_id: reasoning_part_id.clone(),
+                                part_type: "reasoning".to_string(),
+                                metadata: None,
                             })
                             .await;
                     }
@@ -269,6 +398,18 @@ pub async fn run_agent_loop(
                         .send(StreamEvent::ToolPending {
                             call_id: id,
                             tool_name: name,
+                        })
+                        .await;
+                    let _ = event_tx
+                        .send(StreamEvent::ToolCallMetadata {
+                            run_id: run_id.clone(),
+                            step_id: step_id.clone(),
+                            call_id: accumulators[index].id.clone(),
+                            tool_name: Some(accumulators[index].name.clone()),
+                            metadata: Some(json!({
+                                "index": index,
+                                "stage": "pending",
+                            })),
                         })
                         .await;
                 }
@@ -320,9 +461,14 @@ pub async fn run_agent_loop(
         }
 
         // Accumulate usage
-        total_usage = TokenUsage::new(
+        total_usage = TokenUsage::with_details(
             total_usage.input_tokens + step_usage.input_tokens,
             total_usage.output_tokens + step_usage.output_tokens,
+            total_usage.input_text_tokens + step_usage.input_text_tokens,
+            total_usage.output_text_tokens + step_usage.output_text_tokens,
+            total_usage.reasoning_tokens + step_usage.reasoning_tokens,
+            total_usage.cache_read_tokens + step_usage.cache_read_tokens,
+            total_usage.cache_write_tokens + step_usage.cache_write_tokens,
         );
 
         // Filter out placeholder accumulators (those with empty id)
@@ -339,7 +485,7 @@ pub async fn run_agent_loop(
                 .send(StreamEvent::StepFinish {
                     tokens: step_usage,
                     cost,
-                    reason: stop_reason,
+                    reason: stop_reason.clone(),
                 })
                 .await;
 
@@ -347,6 +493,14 @@ pub async fn run_agent_loop(
             // Some models (e.g. Gemini) occasionally return empty after tool results
             if text_content.is_empty() && step > 0 && empty_retries < 1 {
                 empty_retries += 1;
+                last_loop_state = Some(LoopState {
+                    run_id: run_id.clone(),
+                    completed_steps: step + 1,
+                    total_usage: total_usage.clone(),
+                    last_stop_reason: Some(stop_reason.clone()),
+                    last_text_output: text_content.clone(),
+                    last_tool_calls: vec![],
+                });
                 continue;
             }
 
@@ -368,6 +522,7 @@ pub async fn run_agent_loop(
                 arguments: tc.arguments.clone(),
             })
             .collect();
+        let executed_tool_calls = tool_call_infos.clone();
         messages.push(Message::assistant_with_tool_calls(
             if text_content.is_empty() {
                 None
@@ -378,14 +533,37 @@ pub async fn run_agent_loop(
         ));
 
         // Execute tools sequentially
+        let active_tool_set = step_prep.active_tools.as_ref().map(|names| {
+            names
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashSet<String>>()
+        });
         for tc in &completed_calls {
+            if let Some(allowed) = &active_tool_set {
+                if !allowed.contains(&tc.name) {
+                    let denial = format!("Tool '{}' is not active for this step", tc.name);
+                    let _ = event_tx
+                        .send(StreamEvent::ToolDenied {
+                            call_id: tc.id.clone(),
+                            error: denial.clone(),
+                        })
+                        .await;
+                    messages.push(Message::tool_result(
+                        tc.id.clone(),
+                        format!("Tool denied: {denial}"),
+                    ));
+                    continue;
+                }
+            }
+
             // If approval channel is configured, request approval before executing
             if let Some(ref atx) = approval_tx {
-                let _ = event_tx
-                    .send(StreamEvent::ToolApprovalRequired {
-                        call_id: tc.id.clone(),
-                        tool_name: tc.name.clone(),
-                        arguments: tc.arguments.clone(),
+                    let _ = event_tx
+                        .send(StreamEvent::ToolApprovalRequired {
+                            call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            arguments: tc.arguments.clone(),
                     })
                     .await;
 
@@ -468,6 +646,17 @@ pub async fn run_agent_loop(
                     tool_name: Some(tc.name.clone()),
                 })
                 .await;
+            let _ = event_tx
+                .send(StreamEvent::ToolCallMetadata {
+                    run_id: run_id.clone(),
+                    step_id: step_id.clone(),
+                    call_id: tc.id.clone(),
+                    tool_name: Some(tc.name.clone()),
+                    metadata: Some(json!({
+                        "stage": "running",
+                    })),
+                })
+                .await;
 
             let args: serde_json::Value = serde_json::from_str(&tc.arguments)
                 .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
@@ -483,6 +672,18 @@ pub async fn run_agent_loop(
                             title: tool_result.title.clone(),
                         })
                         .await;
+                    let _ = event_tx
+                        .send(StreamEvent::ToolCallMetadata {
+                            run_id: run_id.clone(),
+                            step_id: step_id.clone(),
+                            call_id: tc.id.clone(),
+                            tool_name: Some(tc.name.clone()),
+                            metadata: Some(json!({
+                                "stage": "completed",
+                                "title": tool_result.title,
+                            })),
+                        })
+                        .await;
                     messages.push(Message::tool_result(tc.id.clone(), tool_result.output));
                 }
                 Err(e) => {
@@ -491,6 +692,18 @@ pub async fn run_agent_loop(
                         .send(StreamEvent::ToolError {
                             call_id: tc.id.clone(),
                             error: error_msg.clone(),
+                        })
+                        .await;
+                    let _ = event_tx
+                        .send(StreamEvent::ToolCallMetadata {
+                            run_id: run_id.clone(),
+                            step_id: step_id.clone(),
+                            call_id: tc.id.clone(),
+                            tool_name: Some(tc.name.clone()),
+                            metadata: Some(json!({
+                                "stage": "error",
+                                "error": error_msg,
+                            })),
                         })
                         .await;
                     messages.push(Message::tool_result(
@@ -508,9 +721,17 @@ pub async fn run_agent_loop(
             .send(StreamEvent::StepFinish {
                 tokens: step_usage,
                 cost,
-                reason: stop_reason,
+                reason: stop_reason.clone(),
             })
             .await;
+        last_loop_state = Some(LoopState {
+            run_id: run_id.clone(),
+            completed_steps: step + 1,
+            total_usage: total_usage.clone(),
+            last_stop_reason: Some(stop_reason),
+            last_text_output: text_content,
+            last_tool_calls: executed_tool_calls,
+        });
     }
 
     // Exhausted all steps (should not reach here if graceful stop worked)

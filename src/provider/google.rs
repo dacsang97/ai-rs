@@ -3,7 +3,7 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::stream::{Stream, StreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -52,6 +52,15 @@ impl GoogleProvider {
 
     fn build_request_body(&self, request: &ChatRequest) -> serde_json::Value {
         let (contents, system_instruction) = messages_to_google(&request.messages);
+        let filtered_tools = request.tools.as_ref().map(|tools| {
+            if let Some(active) = &request.active_tools {
+                tools.iter()
+                    .filter(|tool| active.iter().any(|name| name == &tool.name))
+                    .collect::<Vec<_>>()
+            } else {
+                tools.iter().collect::<Vec<_>>()
+            }
+        });
 
         let mut body = json!({ "contents": contents });
 
@@ -80,10 +89,10 @@ impl GoogleProvider {
         }
 
         // tools
-        if let Some(ref tools) = request.tools {
+        if let Some(tools) = filtered_tools {
             if !tools.is_empty() {
                 let declarations: Vec<serde_json::Value> =
-                    tools.iter().map(tool_to_google).collect();
+                    tools.iter().map(|tool| tool_to_google(tool)).collect();
                 body["tools"] = json!([{ "functionDeclarations": declarations }]);
                 body["toolConfig"] = json!({ "functionCallingConfig": { "mode": "AUTO" } });
             }
@@ -517,7 +526,7 @@ struct GoogleResponseFunctionCall {
     args: serde_json::Value,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GoogleResponseUsage {
     #[serde(default)]
@@ -576,9 +585,23 @@ fn parse_chat_response(resp: GoogleChatResponse) -> Result<ChatResponse> {
     let usage = resp
         .usage_metadata
         .map(|u| {
-            TokenUsage::new(
+            let output = u.candidates_token_count + u.thoughts_token_count;
+            TokenUsage::with_details(
                 u.prompt_token_count,
-                u.candidates_token_count + u.thoughts_token_count,
+                output,
+                u.prompt_token_count,
+                u.candidates_token_count,
+                u.thoughts_token_count,
+                0,
+                0,
+            )
+            .with_metadata(
+                serde_json::to_value(&u).ok(),
+                Some(json!({
+                    "provider": "google",
+                    "candidates_tokens": u.candidates_token_count,
+                    "thought_tokens": u.thoughts_token_count,
+                })),
             )
         })
         .unwrap_or_default();

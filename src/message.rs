@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::types::Role;
 
@@ -21,6 +22,25 @@ pub struct ImageUrl {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MessageMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageEnvelope {
+    pub message: Message,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<MessageMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +135,22 @@ impl Message {
             Self::User { .. } => Role::User,
             Self::Assistant { .. } => Role::Assistant,
             Self::Tool { .. } => Role::Tool,
+        }
+    }
+}
+
+impl MessageEnvelope {
+    pub fn new(message: Message) -> Self {
+        Self {
+            message,
+            metadata: None,
+        }
+    }
+
+    pub fn with_metadata(message: Message, metadata: MessageMetadata) -> Self {
+        Self {
+            message,
+            metadata: Some(metadata),
         }
     }
 }

@@ -3,16 +3,17 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::stream::{Stream, StreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::client::HttpClient;
 use crate::message::{ContentPart, Message, ToolCallInfo, UserContent};
+use crate::provider::transform::{ProviderCompatOptions, normalize_messages};
 use crate::stream::handler::{self, StreamChunk};
 use crate::types::{StopReason, TokenUsage};
 use crate::{AiError, Result};
 
-use super::{ChatRequest, ChatResponse, Provider, ToolDef};
+use super::{ChatRequest, ChatResponse, Provider, ToolChoice, ToolDef};
 
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
@@ -53,9 +54,24 @@ impl OpenAiProvider {
     }
 
     fn build_request_body(&self, request: &ChatRequest, stream: bool) -> serde_json::Value {
+        let compat = ProviderCompatOptions::from_provider_options(request.provider_options.as_ref());
+        let normalized_messages = compat
+            .as_ref()
+            .map(|cfg| normalize_messages(&request.messages, cfg))
+            .unwrap_or_else(|| request.messages.clone());
+        let filtered_tools = request.tools.as_ref().map(|tools| {
+            if let Some(active) = &request.active_tools {
+                tools.iter()
+                    .filter(|tool| active.iter().any(|name| name == &tool.name))
+                    .collect::<Vec<_>>()
+            } else {
+                tools.iter().collect::<Vec<_>>()
+            }
+        });
+
         let mut body = json!({
             "model": self.model,
-            "messages": request.messages.iter().map(message_to_openai).collect::<Vec<_>>(),
+            "messages": normalized_messages.iter().map(message_to_openai).collect::<Vec<_>>(),
         });
 
         if stream {
@@ -63,10 +79,27 @@ impl OpenAiProvider {
             body["stream_options"] = json!({"include_usage": true});
         }
 
-        if let Some(ref tools) = request.tools {
+        if let Some(tools) = filtered_tools {
             if !tools.is_empty() {
-                body["tools"] = json!(tools.iter().map(tool_to_openai).collect::<Vec<_>>());
+                body["tools"] = json!(
+                    tools
+                        .iter()
+                        .map(|tool| tool_to_openai(tool))
+                        .collect::<Vec<_>>()
+                );
             }
+        }
+
+        if let Some(ref tool_choice) = request.tool_choice {
+            body["tool_choice"] = match tool_choice {
+                ToolChoice::Auto => json!("auto"),
+                ToolChoice::None => json!("none"),
+                ToolChoice::Required => json!("required"),
+                ToolChoice::Tool(name) => json!({
+                    "type": "function",
+                    "function": { "name": name }
+                }),
+            };
         }
 
         if let Some(temp) = request.temperature {
@@ -291,12 +324,28 @@ struct OpenAiFunction {
     arguments: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct OpenAiUsage {
     prompt_tokens: u64,
     completion_tokens: u64,
     #[allow(dead_code)]
     total_tokens: u64,
+    #[serde(default)]
+    prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
+    #[serde(default)]
+    completion_tokens_details: Option<OpenAiCompletionTokensDetails>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct OpenAiPromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: u64,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct OpenAiCompletionTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: u64,
 }
 
 fn parse_stop_reason(reason: &str) -> Option<StopReason> {
@@ -333,7 +382,34 @@ fn parse_chat_response(resp: OpenAiChatResponse) -> Result<ChatResponse> {
 
     let usage = resp
         .usage
-        .map(|u| TokenUsage::new(u.prompt_tokens, u.completion_tokens))
+        .map(|u| {
+            let cache_read = u
+                .prompt_tokens_details
+                .as_ref()
+                .map_or(0, |d| d.cached_tokens);
+            let reasoning = u
+                .completion_tokens_details
+                .as_ref()
+                .map_or(0, |d| d.reasoning_tokens);
+
+            TokenUsage::with_details(
+                u.prompt_tokens,
+                u.completion_tokens,
+                u.prompt_tokens.saturating_sub(cache_read),
+                u.completion_tokens.saturating_sub(reasoning),
+                reasoning,
+                cache_read,
+                0,
+            )
+            .with_metadata(
+                serde_json::to_value(&u).ok(),
+                Some(json!({
+                    "provider": "openai",
+                    "cached_input_tokens": cache_read,
+                    "reasoning_tokens": reasoning,
+                })),
+            )
+        })
         .unwrap_or_default();
 
     let stop_reason = choice

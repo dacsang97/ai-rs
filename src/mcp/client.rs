@@ -3,8 +3,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::transport::{McpTransport, StdioTransport};
 use super::types::{
-    JsonRpcRequest, McpInitializeResult, McpListToolsResult, McpServerCapabilities,
-    McpToolCallResult, McpToolInfo,
+    JsonRpcRequest, McpGetPromptResult, McpInitializeResult, McpListPromptsResult,
+    McpListResourcesResult, McpListToolsResult, McpReadResourceResult, McpResourceInfo,
+    McpServerCapabilities, McpToolCallResult, McpToolInfo, McpPromptInfo,
 };
 
 pub struct McpClient {
@@ -96,6 +97,37 @@ impl McpClient {
         let result = self.request("tools/list", None).await?;
         let list_result: McpListToolsResult = serde_json::from_value(result)?;
         Ok(list_result.tools)
+    }
+
+    pub async fn list_resources(&self) -> crate::Result<Vec<McpResourceInfo>> {
+        let result = self.request("resources/list", None).await?;
+        let list_result: McpListResourcesResult = serde_json::from_value(result)?;
+        Ok(list_result.resources)
+    }
+
+    pub async fn read_resource(&self, uri: &str) -> crate::Result<McpReadResourceResult> {
+        let params = serde_json::json!({ "uri": uri });
+        let result = self.request("resources/read", Some(params)).await?;
+        serde_json::from_value(result).map_err(Into::into)
+    }
+
+    pub async fn list_prompts(&self) -> crate::Result<Vec<McpPromptInfo>> {
+        let result = self.request("prompts/list", None).await?;
+        let list_result: McpListPromptsResult = serde_json::from_value(result)?;
+        Ok(list_result.prompts)
+    }
+
+    pub async fn get_prompt(
+        &self,
+        name: &str,
+        arguments: Option<serde_json::Value>,
+    ) -> crate::Result<McpGetPromptResult> {
+        let params = serde_json::json!({
+            "name": name,
+            "arguments": arguments.unwrap_or_else(|| serde_json::json!({})),
+        });
+        let result = self.request("prompts/get", Some(params)).await?;
+        serde_json::from_value(result).map_err(Into::into)
     }
 
     pub async fn call_tool(

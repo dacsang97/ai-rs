@@ -6,6 +6,11 @@ fn token_usage_new_computes_total() {
     assert_eq!(usage.input_tokens, 150);
     assert_eq!(usage.output_tokens, 350);
     assert_eq!(usage.total_tokens, 500);
+    assert_eq!(usage.input_text_tokens, 150);
+    assert_eq!(usage.output_text_tokens, 350);
+    assert_eq!(usage.reasoning_tokens, 0);
+    assert_eq!(usage.cache_read_tokens, 0);
+    assert_eq!(usage.cache_write_tokens, 0);
 }
 
 #[test]
@@ -20,6 +25,11 @@ fn token_usage_default() {
     assert_eq!(usage.input_tokens, 0);
     assert_eq!(usage.output_tokens, 0);
     assert_eq!(usage.total_tokens, 0);
+    assert_eq!(usage.input_text_tokens, 0);
+    assert_eq!(usage.output_text_tokens, 0);
+    assert_eq!(usage.reasoning_tokens, 0);
+    assert_eq!(usage.cache_read_tokens, 0);
+    assert_eq!(usage.cache_write_tokens, 0);
 }
 
 #[test]
@@ -62,4 +72,33 @@ fn token_usage_serialization_round_trip() {
     assert_eq!(parsed.input_tokens, 42);
     assert_eq!(parsed.output_tokens, 58);
     assert_eq!(parsed.total_tokens, 100);
+    assert_eq!(parsed.input_text_tokens, 42);
+    assert_eq!(parsed.output_text_tokens, 58);
+    assert_eq!(parsed.reasoning_tokens, 0);
+}
+
+#[test]
+fn token_usage_with_details_sets_breakdown() {
+    let usage = TokenUsage::with_details(100, 60, 80, 40, 20, 10, 5);
+    assert_eq!(usage.input_tokens, 100);
+    assert_eq!(usage.output_tokens, 60);
+    assert_eq!(usage.total_tokens, 160);
+    assert_eq!(usage.input_text_tokens, 80);
+    assert_eq!(usage.output_text_tokens, 40);
+    assert_eq!(usage.reasoning_tokens, 20);
+    assert_eq!(usage.cache_read_tokens, 10);
+    assert_eq!(usage.cache_write_tokens, 5);
+}
+
+#[test]
+fn token_usage_with_metadata_sets_optional_fields() {
+    let usage = TokenUsage::new(10, 20).with_metadata(
+        Some(serde_json::json!({ "raw": true })),
+        Some(serde_json::json!({ "provider": "openai" })),
+    );
+    assert_eq!(usage.raw, Some(serde_json::json!({ "raw": true })));
+    assert_eq!(
+        usage.provider_metadata,
+        Some(serde_json::json!({ "provider": "openai" }))
+    );
 }
