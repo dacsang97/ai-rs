@@ -2,7 +2,7 @@ use futures::StreamExt;
 use serde_json::json;
 
 use crate::message::{Message, ToolCallInfo};
-use crate::provider::{ChatRequest, Provider, ToolChoice};
+use crate::provider::{ChatRequest, Provider, ToolChoice, TransportMode};
 use crate::session::approval::{ApprovalRequest, ApprovalResponse};
 use crate::stream::handler::{StreamChunk, ToolCallAccumulator};
 use crate::stream::StreamEvent;
@@ -71,6 +71,12 @@ pub struct AgentConfig {
     pub cost_per_input: f64,
     pub cost_per_output: f64,
     pub headers: Option<std::collections::HashMap<String, String>>,
+    pub session_id: Option<String>,
+    pub provider_options: Option<serde_json::Value>,
+    pub metadata: Option<serde_json::Value>,
+    pub transport: Option<TransportMode>,
+    pub reasoning_effort: Option<String>,
+    pub max_retries: Option<u32>,
     pub approval_timeout_secs: u64,
     /// Prompt injected on the last step so the model wraps up gracefully
     /// instead of hitting a hard error. Set `None` to use the built-in default.
@@ -92,6 +98,12 @@ impl Default for AgentConfig {
             cost_per_input: 0.0,
             cost_per_output: 0.0,
             headers: None,
+            session_id: None,
+            provider_options: None,
+            metadata: None,
+            transport: None,
+            reasoning_effort: None,
+            max_retries: None,
             approval_timeout_secs: 300,
             stop_prompt: None,
             prune_after: DEFAULT_PRUNE_AFTER,
@@ -99,6 +111,23 @@ impl Default for AgentConfig {
             prepare_step: None,
             stop_when: None,
         }
+    }
+}
+
+fn merge_optional_json(
+    base: Option<serde_json::Value>,
+    extra: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    match (base, extra) {
+        (None, None) => None,
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (Some(serde_json::Value::Object(mut base_map)), Some(serde_json::Value::Object(extra_map))) => {
+            for (key, value) in extra_map {
+                base_map.insert(key, value);
+            }
+            Some(serde_json::Value::Object(base_map))
+        }
+        (_, Some(extra_value)) => Some(extra_value),
     }
 }
 
@@ -299,14 +328,14 @@ pub async fn run_agent_loop(
             max_tokens: None,
             stop: step_prep.stop.clone(),
             headers,
-            reasoning_effort: None,
-            session_id: None,
-            provider_options: None,
-            metadata: step_prep.metadata.clone(),
+            reasoning_effort: config.reasoning_effort.clone(),
+            session_id: config.session_id.clone(),
+            provider_options: config.provider_options.clone(),
+            metadata: merge_optional_json(config.metadata.clone(), step_prep.metadata.clone()),
             tool_choice: step_prep.tool_choice.clone(),
             active_tools: step_prep.active_tools.clone(),
-            transport: None,
-            max_retries: None,
+            transport: config.transport,
+            max_retries: config.max_retries,
         };
 
         // Call provider.chat_stream
