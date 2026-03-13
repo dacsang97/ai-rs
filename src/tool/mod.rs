@@ -42,14 +42,20 @@ impl ToolRegistry {
     }
 
     pub fn definitions(&self) -> Vec<ToolDef> {
-        self.executors.iter().flat_map(|e| e.definitions()).collect()
-    }
-
-    pub fn definitions_excluding(&self, exclude: &HashSet<String>) -> Vec<ToolDef> {
+        let mut seen = HashSet::new();
         self.executors
             .iter()
             .flat_map(|e| e.definitions())
-            .filter(|d| !exclude.contains(&d.name))
+            .filter(|d| seen.insert(d.name.clone()))
+            .collect()
+    }
+
+    pub fn definitions_excluding(&self, exclude: &HashSet<String>) -> Vec<ToolDef> {
+        let mut seen = HashSet::new();
+        self.executors
+            .iter()
+            .flat_map(|e| e.definitions())
+            .filter(|d| !exclude.contains(&d.name) && seen.insert(d.name.clone()))
             .collect()
     }
 
