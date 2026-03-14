@@ -377,6 +377,7 @@ fn parse_chat_response(resp: OpenAiChatResponse) -> Result<ChatResponse> {
             id: tc.id,
             name: tc.function.name,
             arguments: tc.function.arguments,
+            thought_signature: None,
         })
         .collect();
 
