@@ -8,6 +8,9 @@ pub struct ToolCallInfo {
     pub id: String,
     pub name: String,
     pub arguments: String,
+    /// Gemini 3 thought signature — must be echoed back in conversation history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

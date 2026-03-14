@@ -413,7 +413,7 @@ pub async fn run_agent_loop(
                         })
                         .await;
                 }
-                StreamChunk::ToolCallStart { index, id, name } => {
+                StreamChunk::ToolCallStart { index, id, name, thought_signature } => {
                     while accumulators.len() <= index {
                         accumulators.push(ToolCallAccumulator::new(
                             accumulators.len(),
@@ -421,8 +421,9 @@ pub async fn run_agent_loop(
                             String::new(),
                         ));
                     }
-                    accumulators[index] =
-                        ToolCallAccumulator::new(index, id.clone(), name.clone());
+                    let mut acc = ToolCallAccumulator::new(index, id.clone(), name.clone());
+                    acc.thought_signature = thought_signature;
+                    accumulators[index] = acc;
                     let _ = event_tx
                         .send(StreamEvent::ToolPending {
                             call_id: id,
@@ -549,6 +550,7 @@ pub async fn run_agent_loop(
                 id: tc.id.clone(),
                 name: tc.name.clone(),
                 arguments: tc.arguments.clone(),
+                thought_signature: tc.thought_signature.clone(),
             })
             .collect();
         let executed_tool_calls = tool_call_infos.clone();

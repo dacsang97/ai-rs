@@ -11,6 +11,8 @@ pub enum StreamChunk {
         index: usize,
         id: String,
         name: String,
+        /// Gemini 3 thought signature — must be echoed back.
+        thought_signature: Option<String>,
     },
     ToolCallDelta {
         index: usize,
@@ -28,6 +30,7 @@ pub struct ToolCallAccumulator {
     pub id: String,
     pub name: String,
     pub arguments: String,
+    pub thought_signature: Option<String>,
 }
 
 impl ToolCallAccumulator {
@@ -37,6 +40,7 @@ impl ToolCallAccumulator {
             id,
             name,
             arguments: String::new(),
+            thought_signature: None,
         }
     }
 
@@ -161,6 +165,7 @@ pub fn parse_chunk(raw: &str) -> crate::Result<Vec<StreamChunk>> {
                             .as_ref()
                             .and_then(|f| f.name.clone())
                             .unwrap_or_default(),
+                        thought_signature: None,
                     });
                 }
 

@@ -38,6 +38,8 @@ struct GooglePart {
     thought: Option<bool>,
     #[serde(default)]
     function_call: Option<GoogleFunctionCall>,
+    #[serde(default)]
+    thought_signature: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,6 +83,7 @@ pub fn parse_google_chunk(raw: &str) -> crate::Result<Vec<StreamChunk>> {
                         index: tool_index,
                         id,
                         name: fc.name.clone(),
+                        thought_signature: part.thought_signature.clone(),
                     });
                     results.push(StreamChunk::ToolCallDelta {
                         index: tool_index,

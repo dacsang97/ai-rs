@@ -278,12 +278,16 @@ fn message_parts(msg: &Message, all_messages: &[Message]) -> Vec<serde_json::Val
                 for tc in tcs {
                     let args: serde_json::Value =
                         serde_json::from_str(&tc.arguments).unwrap_or(json!({}));
-                    parts.push(json!({
+                    let mut part = json!({
                         "functionCall": {
                             "name": tc.name,
                             "args": args,
                         }
-                    }));
+                    });
+                    if let Some(ref sig) = tc.thought_signature {
+                        part["thoughtSignature"] = json!(sig);
+                    }
+                    parts.push(part);
                 }
             }
             if parts.is_empty() {
@@ -518,6 +522,8 @@ struct GoogleResponsePart {
     thought: Option<bool>,
     #[serde(default)]
     function_call: Option<GoogleResponseFunctionCall>,
+    #[serde(default)]
+    thought_signature: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -567,6 +573,7 @@ fn parse_chat_response(resp: GoogleChatResponse) -> Result<ChatResponse> {
                     id: Uuid::new_v4().to_string(),
                     name: fc.name,
                     arguments: serde_json::to_string(&fc.args).unwrap_or_default(),
+                    thought_signature: part.thought_signature,
                 });
             } else if let Some(text) = part.text {
                 if part.thought == Some(true) {
