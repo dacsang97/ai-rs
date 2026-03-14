@@ -89,6 +89,7 @@ fn normalizes_tool_call_ids_and_tool_results() {
                 id: "call:bad/id".into(),
                 name: "read_file".into(),
                 arguments: "{}".into(),
+                thought_signature: None,
             }],
         ),
         Message::tool_result("call:bad/id", "ok"),

@@ -157,6 +157,7 @@ async fn stop_when_halts_before_second_provider_call() {
             index: 0,
             id: "call-1".into(),
             name: "allowed_tool".into(),
+            thought_signature: None,
         },
         StreamChunk::ToolCallDelta {
             index: 0,

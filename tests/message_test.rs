@@ -41,6 +41,7 @@ fn assistant_with_tool_calls_serialization() {
         id: "call_1".into(),
         name: "read_file".into(),
         arguments: r#"{"path":"foo.rs"}"#.into(),
+        thought_signature: None,
     }];
     let msg = Message::assistant_with_tool_calls(Some("thinking...".into()), calls);
     let json = serde_json::to_value(&msg).unwrap();
@@ -59,6 +60,7 @@ fn tool_call_info_serialization() {
         id: "c1".into(),
         name: "bash".into(),
         arguments: r#"{"cmd":"ls"}"#.into(),
+        thought_signature: None,
     };
     let json = serde_json::to_value(&info).unwrap();
     assert_eq!(json["id"], "c1");
