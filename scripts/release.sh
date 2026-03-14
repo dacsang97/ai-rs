@@ -104,8 +104,9 @@ fi
 
 # --- 1. Update Cargo.toml ---
 if [ "$DRY_RUN" = false ]; then
-  sed -i.bak "0,/^version = \".*\"/s//version = \"$NEW_VERSION\"/" "$CARGO_TOML"
-  rm -f "$CARGO_TOML.bak"
+  # macOS sed doesn't support 0,/pat/ — use awk to replace only first match
+  awk -v new="$NEW_VERSION" '!done && /^version = "/ { sub(/"[^"]*"/, "\"" new "\""); done=1 } 1' "$CARGO_TOML" > "$CARGO_TOML.tmp"
+  mv "$CARGO_TOML.tmp" "$CARGO_TOML"
 fi
 echo -e "  ${GREEN}✓${NC} Cargo.toml: $OLD_VERSION → $NEW_VERSION"
 
